@@ -1,92 +1,105 @@
-import streamlit as st
-from langchain.document_loaders import PyPDFLoader, Docx2txtLoader, CSVLoader, ExcelLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.embeddings import OpenAIEmbeddings
-from langchain.vectorstores import FAISS
-from langchain.chains import RetrievalQA
-from langchain.llms import OpenAI
 import os
-from dotenv import load_dotenv
+import streamlit as st
+from langchain_openai import ChatOpenAI
+from browser_use import Agent, Browser
+import asyncio
 
-# Load environment variables
-load_dotenv()
+# Set page config
+st.set_page_config(
+    page_title="Browser Automation Suite",
+    page_icon="🌐",
+    layout="wide"
+)
 
-# Set OpenAI API key from environment variable
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    st.error("OpenAI API key not found in environment variables. Please add it to your `.env` file.")
-    st.stop()
+def setup_session_state():
+    """Initialize session state variables"""
+    if 'browser' not in st.session_state:
+        st.session_state.browser = Browser()
+    if 'context' not in st.session_state:
+        st.session_state.context = None
+    if 'model' not in st.session_state:
+        st.session_state.model = ChatOpenAI(model='gpt-4o')
 
-# Function to load documents
-def load_document(file):
-    if file.type == "application/pdf":
-        loader = PyPDFLoader(file.name)
-    elif file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-        loader = Docx2txtLoader(file.name)
-    elif file.type == "text/csv":
-        loader = CSVLoader(file.name)
-    elif file.type in ["application/vnd.ms-excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"]:
-        loader = ExcelLoader(file.name)
-    else:
-        st.error("Unsupported file type")
-        return None
-    return loader.load()
+async def run_agent(task, context):
+    """Run an agent with the given task"""
+    agent = Agent(
+        task=task,
+        llm=st.session_state.model,
+        browser_context=context
+    )
+    return await agent.run()
 
-# Function to split text into chunks
-def split_text(docs):
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    texts = text_splitter.split_documents(docs)
-    return texts
-
-# Function to create a vector store using OpenAI embeddings
-def create_vector_store(texts):
-    embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
-    vectorstore = FAISS.from_documents(texts, embeddings)
-    return vectorstore
-
-# Function to create the RAG chain with GPT-4o
-def create_rag_chain(vectorstore):
-    llm = OpenAI(openai_api_key=OPENAI_API_KEY, model_name="gpt-4o", temperature=0)
-    qa_chain = RetrievalQA.from_chain_type(llm, chain_type="stuff", retriever=vectorstore.as_retriever())
-    return qa_chain
-
-# Streamlit UI
 def main():
-    st.title("RAG Streamlit App with GPT-4o")
+    setup_session_state()
+    
+    st.title("Multi-Agent Browser Automation")
+    st.markdown("Control multiple AI agents to perform browser tasks simultaneously")
+    
+    # Sidebar controls
+    with st.sidebar:
+        st.header("Configuration")
+        api_key = st.text_input("OpenAI API Key", type="password")
+        os.environ["OPENAI_API_KEY"] = api_key
+        
+        if st.button("Initialize Browser Session"):
+            st.session_state.context = asyncio.run(st.session_state.browser.new_context().__aenter__())
+            st.success("Browser session initialized!")
 
-    # File uploader
-    uploaded_files = st.file_uploader("Upload documents", type=["pdf", "docx", "csv", "xlsx"], accept_multiple_files=True)
+    # Main interface
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        st.subheader("Agent Control Panel")
+        
+        task1 = st.text_input(
+            "Agent 1 Task:",
+            "Open 2 tabs with Wikipedia articles about the history of the meta and one random Wikipedia article"
+        )
+        
+        task2 = st.text_input(
+            "Agent 2 Task:",
+            "Considering all open tabs give me the names of the Wikipedia articles"
+        )
 
-    if uploaded_files:
-        docs = []
-        for file in uploaded_files:
-            # Save the file temporarily
-            with open(file.name, "wb") as f:
-                f.write(file.getbuffer())
-            # Load the document
-            loaded_docs = load_document(file)
-            if loaded_docs:
-                docs.extend(loaded_docs)
+        if st.button("Run Agents"):
+            if not st.session_state.context:
+                st.error("Please initialize browser session first!")
+                return
+                
+            with st.spinner("Running agents..."):
+                # Run agents asynchronously
+                async def run_all_agents():
+                    results = await asyncio.gather(
+                        run_agent(task1, st.session_state.context),
+                        run_agent(task2, st.session_state.context)
+                    )
+                    return results
+                
+                results = asyncio.run(run_all_agents())
+                
+                st.session_state.agent1_result = results[0]
+                st.session_state.agent2_result = results[1]
+                
+            st.success("Agents completed their tasks!")
 
-        if docs:
-            # Split text into chunks
-            texts = split_text(docs)
+    with col2:
+        st.subheader("Execution Results")
+        
+        if 'agent1_result' in st.session_state:
+            with st.expander("Agent 1 Actions", expanded=True):
+                st.write("**Task:**", task1)
+                st.write("**Browser Actions:**")
+                st.code(st.session_state.agent1_result['actions'], language="json")
+                st.write("**Final Response:**")
+                st.markdown(f"> {st.session_state.agent1_result['response']}")
 
-            # Create vector store
-            vectorstore = create_vector_store(texts)
-
-            if vectorstore:
-                st.success("Documents processed successfully!")
-
-                # Question input
-                question = st.text_input("Ask a question:")
-
-                if question:
-                    # Create RAG chain
-                    qa_chain = create_rag_chain(vectorstore)
-                    # Get answer
-                    answer = qa_chain.run(question)
-                    st.write("**Answer:**", answer)
+        if 'agent2_result' in st.session_state:
+            with st.expander("Agent 2 Actions", expanded=True):
+                st.write("**Task:**", task2)
+                st.write("**Browser Actions:**")
+                st.code(st.session_state.agent2_result['actions'], language="json")
+                st.write("**Final Response:**")
+                st.markdown(f"> {st.session_state.agent2_result['response']}")
 
 if __name__ == "__main__":
     main()
