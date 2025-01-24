@@ -6,3 +6,4 @@ python-docx
 pandas
 python-dotenv
 faiss-cpu
+langchain-community
